@@ -128,7 +128,7 @@ The full quiz scripts live in my local lab (`opencode/benchmark_python_*`) and a
 | Need | Pick |
 |------|------|
 | Snappy interactive coding/chat | `Qwen3.5-4B-MTP` (llama.cpp) - #3 |
-| Stronger FreeToken / Hermes on `:1919` | `gpt-oss-20b` |
+| Stronger FreeToken / Hermes / OpenCode | `gpt-oss-20b` |
 | Demo MoE larger than VRAM | `Qwen3.6-35B-A3B-NVFP4` |
 
 FreeToken **does not mix** MTP + MoE-offload on these checkpoints. Treat as **two configs**, not one winner.
