@@ -1,262 +1,247 @@
 # Adventures In AI Coding 4
 ## FreeToken
 
-Run a larger model than what your VRAM allows.
+**I ran Mixture-of-Experts models bigger than my 10 GB graphics card** by keeping the specialists in system RAM. Here is what worked, how fast, what passed a small coding quiz, and what I would actually leave running day to day.
 
 **Series:** [AI_Coding](https://github.com/Vince-0/AI_Coding) -> [AdventuresInAICoding](https://github.com/Vince-0/AdventuresInAICoding) -> [AdventuresInAICoding2](https://github.com/Vince-0/AdventuresInAICoding2) -> [AdventuresInAICoding3](https://github.com/Vince-0/AdventuresInAICoding3) -> **#4 FreeToken**
 
-**Upstream:** [FlashML-org/FreeToken](https://github.com/FlashML-org/FreeToken) · [docs/models.md](https://github.com/FlashML-org/FreeToken/blob/main/docs/models.md) · [paper arXiv:2608.16157](https://arxiv.org/abs/2608.16157)
+**Upstream:** [FlashML-org/FreeToken](https://github.com/FlashML-org/FreeToken) · [docs/models.md](https://github.com/FlashML-org/FreeToken/blob/main/docs/models.md) · [paper](https://arxiv.org/abs/2608.16157)
 
----
-
-## Key concepts
-
-Adventure-specific terms for FreeToken on this box. General LLM / MoE / KV pipeline: **[AI Theory](https://github.com/Vince-0/AI_Theory#key-concepts)**.
-
-| Term | Stands for / full name | On this adventure |
-|------|------------------------|-------------------|
-| **Host RAM (WSL)** | System memory inside the Linux guest | **MoE fit gate** (~27 GiB). Measure with `free -h` in WSL, not Task Manager. |
-| **VRAM** | Video RAM (GPU memory) | RTX 3080 **10 GB**: attention + **MoE cache** + KV - **not** the full expert pool. |
-| **Expert pool** | All MoE expert weights | Lives in **host RAM** for FreeToken offload. |
-| **MoE cache (LRU)** | Least-Recently-Used expert cache in VRAM | Hot experts stay on GPU; misses fetch over PCIe (`offload`) or CPU. |
-| **`offload` vs `hybrid`** | FreeToken MoE miss backends | Pick with `ft bench bw`. This box: **`offload`** (CPU/PCIe ratio &lt; 2x). |
-| **PCIe H2D** | Host-to-device over PCI Express | Steady expert-miss path once weights are resident - not the same as HDD cold load. |
-| **KV reserve / rebuild** | Allocated context pages + live cache resize | `ft ctl cache rebuild --kv N --moe M` - growing KV alone fails if MoE cache is already maxed. |
-| **NVFP4 / MXFP4** | Low-bit weight formats FreeToken serves here | What made gpt-oss / Gemma / Qwen MoEs fit ~27 GiB RAM. |
-| **`fused` (dense on FT)** | Engine path with no routed experts | Support list ≠ MoE architecture (Muse lesson) - wrong demo for host-RAM experts. |
-| **`ft serve` / `ft launch` / `ft ctl`** | FreeToken CLI | Serve on `:1919`, launch Hermes/OpenCode, rebuild caches. |
-| **MTP (vs #3)** | Multi-Token Prediction | #3 speed story on *fitted* GGUFs. FreeToken MoE-offload here does not mix MTP - dual configs. |
+**Primer (how LLMs / MoE / KV work in plain language):** [AI Theory](https://github.com/Vince-0/AI_Theory)
 
 ---
 
 ## Why
 
-Because the cloud is someone else's computer and AI usage credits aren't cheap. Adventures #3 got models that **already fit** a 10GB card running **faster** (MTP on small GGUFs). This round asks a different question: which [Mixture-of-Experts](https://github.com/Vince-0/AI_Theory#key-concepts) models that **don't fit VRAM** can still run at interactive speed on the same box?
+Cloud AI is someone else's computer, and credits add up. In [Adventures #3](https://github.com/Vince-0/AdventuresInAICoding3) I pushed **models that already fit** a 10 GB card to go **faster** (MTP on small GGUFs).
 
-Usual local LLM rule: **weights + [KV](https://github.com/Vince-0/AI_Theory#walk-attention) must fit in VRAM**. MoE breaks the *compute* side of that story (few experts active per token) but not the *storage* side - the full [expert pool](https://github.com/Vince-0/AI_Theory#sparse-compute-vs-storage) is still huge. ([AI Theory - sparse compute vs storage](https://github.com/Vince-0/AI_Theory#sparse-compute-vs-storage))
+This round asks a different question: can I run **Mixture-of-Experts (MoE)** models whose full weight file is **larger than the graphics card**, at a speed that still feels usable?
 
-**FreeToken's premise:** keep experts in **host RAM**, use the GPU as attention + an **LRU expert cache**, and on misses stream over **PCIe** (`offload`) or run on CPU / hybrid. Success on a gaming PC is "MoE larger than VRAM runs at interactive speed," not "buy a 48GB card."
+Usual local rule: everything important must fit in **VRAM** (GPU memory). MoE only *activates* a few specialists per token, but you still **store** the whole specialist library somewhere. That library is the **expert pool** - often far bigger than 10 GB.
+
+**FreeToken's idea:** keep that library in **host RAM** (system memory), keep a small **hot cache** of specialists on the GPU, and on a miss copy what you need over the PCIe link (`offload`). Success on a gaming PC means: "MoE larger than VRAM runs at interactive speed" - not "buy a 48 GB card."
+
+Background: [AI Theory - sparse compute vs storage](https://github.com/Vince-0/AI_Theory#sparse-compute-vs-storage).
+
+### Why not just llama.cpp / buy VRAM?
+
+| Approach | Idea | Gap for this question |
+|----------|------|------------------------|
+| Quantize until it fits (llama.cpp / Ollama) | Shrink weights into VRAM | Huge expert pools still awkward; oversized files thrash when they do not fit RAM either |
+| Dense "fit the card" servers (e.g. vLLM) | Fast serving for models that fit | Wrong tool for "35B-class MoE on 10 GB VRAM" |
+| Buy more VRAM | Bigger card holds more | Expensive; ignores MoE + host RAM as the design |
+| **FreeToken** | Host-RAM experts + GPU cache + bandwidth-aware misses | Built so **total MoE size >> VRAM** is normal |
+
+This write-up is **filter + measure** on my ~27 GiB WSL RAM box - not a claim that DeepSeek-class MoEs run on a 3080.
 
 ---
 
-## How
+## What I did (short path)
 
-Get FreeToken serving on WSL, calibrate bandwidth, filter [models.md](https://github.com/FlashML-org/FreeToken/blob/main/docs/models.md) against ~27 GiB host RAM, then measure tok/s and a small Python pass/fail set - same spirit as #3's Hermes benchmarks, different memory wall.
+**PC:** Windows 11, WSL Ubuntu 24.04, RTX **3080 10 GB**, WSL `memory=28GB` (~**27 GiB** inside), FreeToken **0.1.2**, CUDA toolkit **13.2** for FreeToken (kept **12.8** for llama.cpp), spinning HDD.
 
-### Environment
-
-**OS:** Windows 11 with WSL Ubuntu 24.04
-
-| Spec | Value | Implication |
-|------|-------|-------------|
-| GPU | RTX 3080 **10GB** (sm_86) | Cache + KV live here - not the full expert pool |
-| Host RAM (WSL) | **~27 GiB** (`memory=28GB` in `.wslconfig`) | **Primary MoE fit gate** - measure with `free -h` inside WSL |
-| CUDA | Toolkit **13.2** for FreeToken JIT; **12.8** kept for llama.cpp | FreeToken needed `nvcc` 13.x on PATH (kept both toolkits) |
-| Disk | **5400RPM** | Hurts download / cold load; not steady PCIe H2D once resident |
-| FreeToken | **0.1.2** from source | `ft serve` / `ft launch` / `ft ctl` |
-
-**Sizing rule:** host RAM holds the expert pool (prefer ≲20-23 GB NVFP4 on this box); VRAM holds attention + MoE cache + KV.
-
-### Novelty (vs the usual options)
-
-| Approach | Idea | Gap on this question |
-|----------|------|----------------------|
-| **llama.cpp / Ollama** | Quantize until weights (+ KV) fit | Huge MoE expert pools still awkward; oversized GGUF thrash when ≫ RAM |
-| **vLLM / dense "fit the card"** | High-throughput serving for fitted weights | Wrong product for "35B MoE on 10GB VRAM" |
-| **"Just buy VRAM"** | Bigger card holds more | Expensive; doesn't use MoE sparsity + host RAM as the design center |
-| **FreeToken** | Host-resident [experts](https://github.com/Vince-0/AI_Theory#key-concepts) + GPU cache + bandwidth-aware miss path | Built so **total MoE size ≫ VRAM** is normal ([sparse vs storage](https://github.com/Vince-0/AI_Theory#sparse-compute-vs-storage)) |
-
-This adventure is a **filter + measure** story: what FreeToken's support matrix allows on **~27 GiB RAM**, not a claim that DeepSeek-class MoEs run on a 3080.
-
-### What FreeToken claims (vs what we measured)
-
-| Claim | On this PC |
-|-------|------------|
-| Run MoEs ≫ VRAM via host-RAM experts | **Yes** - gpt-oss / Gemma / Qwen NVFP4 |
-| Interactive tok/s on RTX 30-class | **Yes** - ~24-46 tok/s Layer B |
-| Bandwidth-adaptive hybrid | Calibrated; **`offload` won** (CPU/PCIe ratio &lt; 2x) |
-| Elastic MoE cache ↔ KV | **Yes** - live `ft ctl cache rebuild --kv/--moe` |
-| Agent drop-in APIs | **Yes** - Hermes one-shot via `ft launch` |
-| DeepSeek / GLM / Flash-Next class | **Out of scope** - host RAM / PLE |
-
-### Install + calibration
+1. Install FreeToken from source; point `CUDA_HOME` at the 13.2 toolkit so JIT can find `nvcc`.
+2. Run `ft bench bw` to compare CPU vs PCIe bandwidth -> this box prefers **`--moe-backend offload`**.
+3. Download only the weight shards I need (example: gpt-oss without `metal/*` and `original/*`).
+4. Serve one model at a time: `ft serve ... --moe-backend offload --moe-cache-auto`.
+5. Smoke-test with Hermes (`ft launch`), then measure **speed** and a **coding quiz** (below).
+6. Compare against #3's snappy llama.cpp MTP host and a same-family Q8 GGUF baseline.
 
 ```bash
-# FreeToken 0.1.2 from source (uv / venv) - see upstream docs/install.md
-# Point CUDA_HOME at 13.2 toolkit so JIT finds nvcc
-
 ft --version
 ft bench bw --dtype nvfp4,bf16
 # This box: CPU STREAM ~49.5 GB/s · PCIe H2D ~26.8 GB/s -> prefer --moe-backend offload
-```
 
-One model at a time on ~27 GiB. Example serve (speed config):
-
-```bash
 ft serve --model ~/LLM/models/hf/gpt-oss-20b --served-model-name gpt-oss-20b \
   --host 127.0.0.1 --port 1919 --moe-backend offload --moe-cache-auto \
   --kv-reserve-tokens 4096 --memory-ratio 0.85 --max-running-requests 1
 ```
 
-HF tip: `openai/gpt-oss-20b` full repo ~41 GB - exclude `metal/*` and `original/*` (~13 GB MXFP4 only).
+**Sizing rule:** host RAM holds the expert pool (prefer roughly under ~20-23 GB NVFP4 here); VRAM holds attention + MoE cache + conversation memory (KV).
 
 ---
 
-## Models
+## How I measured
 
-**Filter:** FreeToken known-good **MoE** (or offload-family) checkpoints that fit **~27 GiB** with headroom. Reject famous names that need workstation RAM, and dense/`fused` SKUs that won't demo host-RAM experts on 10 GB.
+Two different scores - do not mix them:
 
-### Top-5 shortlist (why these)
+| Name | Plain meaning | How to read it |
+|------|---------------|----------------|
+| **Speed (Layer B)** | How fast the model *writes* after warmup | **Tokens per second (tok/s)** on short decode. Higher = snappier typing feel. Cold load from HDD is excluded. |
+| **Coding quiz (C0)** | Can it write small correct Python? | Fixed prompts -> extract code -> run checks -> **pass/fail**. Reported as **passed/total** (e.g. 19/24). |
 
-| # | Role | Checkpoint | Why |
-|---|------|------------|-----|
-| 1 | Warmup -> **preferred FT daily driver** | `openai/gpt-oss-20b` (~13 GB MXFP4) | Most RAM headroom; proven stack |
-| 2 | Mid MoE | `nvidia/Gemma-4-26B-A4B-NVFP4` (~18.8 GB) | Different lab; still under 27 GiB |
-| 3 | Mid-large | `RedHatAI/Muse-Glimmer-30B-NVFP4` (~23 GB) | Same band as Qwen - **rejected** (dense) |
-| 4 | **Headline MoE** | `nvidia/Qwen3.6-35B-A3B-NVFP4` (~23.5 GB) | Largest runnable FT MoE here |
-| 5 | Engine baseline | llama.cpp `Qwen3.6-35B-A3B-Q8_0.gguf` (~35 GB) | Same family, different wall |
+**C0 (Python coding quiz)** - same *spirit* as Adventures #3:
 
-### Results - FreeToken MoE / offload
+- Ask the model a fixed list of short Python tasks (functions, classes, file I/O, etc.).
+- Parse the code out of the reply.
+- Run it against expected checks.
+- Count passes. Prompts must **pin required names** (function/class names) or the checker and the model disagree and the score collapses (I saw 5/24 before pinning, then **19/24** on gpt-oss).
 
-| # | Model | On-disk | Layer B tok/s | Python C0 | Notes |
-|---|--------|---------|---------------|-----------|-------|
-| 1 | `openai/gpt-oss-20b` (MXFP4) | ~13 GB | **~45.5** | **19/24** | **Preferred FreeToken overall / daily driver:** fastest stable FT decode; best C0; RAM headroom; Hermes `PHASE7_OK`. **vs #3 agent host:** ~3x *slower* than `Qwen3.5-4B-MTP` (~135 tok/s) but **much stronger** on C0 (~19/24 vs ~6-8/28) |
-| 2 | `nvidia/Gemma-4-26B-A4B-NVFP4` | ~18.8 GB | **~24.0** | **8/24** | Slower + weaker C0; CPU MoE layers + mlock - not preferred for Hermes |
-| 4 | `nvidia/Qwen3.6-35B-A3B-NVFP4` | ~23.5 GB | **~35.7** | deferred | **Headline MoE** (largest runnable FT MoE): ≫VRAM proof; ~20 GiB RAM; pageable CPU experts. **Not** the snappy Hermes host |
+The full quiz scripts live in my local lab (`opencode/benchmark_python_*`) and are **not** copied into this GitHub repo. The **numbers below** are from those runs; the method is what matters for reading the tables.
 
-### Prior agent host (llama.cpp - Adventures #3)
+**Speed (Layer B)** - short decode after the model is warm, using a small local bench script against the FreeToken OpenAI-compatible API.
 
-| Model | Decode / C0 (`results_python.log`) | Role vs FreeToken #4 |
-|-------|--------------------------------------|----------------------|
-| `Qwen3.5-4B-MTP-Q4_K_M.gguf` | ~**130-148** tok/s; ~**5-8/28** | **Snappy Hermes/OpenCode pick** - best throughput/UX feel; weaker coding oracles than gpt-oss |
-| `Qwen3.5-9B` Q4 / Sushi Q4 | ~**50-90** tok/s; ~**2-7/28** | Mid llama.cpp path |
-| `Qwen3.6-35B-A3B-Q8_0.gguf` | cold ~**0.2** / warm ~**17** | Same family as FT headline; **loses** to NVFP4 offload (~35.7) - poor agent UX on this box |
+**vs #3:** same idea as Hermes/python quizzes and tok/s there - so you can compare "fast small GGUF" vs "capable MoE on FreeToken."
 
-**Agent split (product, not one winner):**
+---
+
+## Results
+
+### FreeToken MoE / offload (this adventure)
+
+| Role | Model | On-disk | Speed (tok/s) | Coding quiz | Takeaway |
+|------|--------|---------|---------------|-------------|----------|
+| Preferred FreeToken daily driver | `openai/gpt-oss-20b` (MXFP4) | ~13 GB | **~45.5** | **19/24** | Best FT balance here; Hermes one-shot `PHASE7_OK`. Slower than #3 MTP (~135 tok/s) but much stronger on the quiz (~19/24 vs ~6-8/28). |
+| Mid MoE | `nvidia/Gemma-4-26B-A4B-NVFP4` | ~18.8 GB | **~24.0** | **8/24** | Runs; weaker quiz; not my Hermes pick. |
+| Headline "bigger than VRAM" MoE | `nvidia/Qwen3.6-35B-A3B-NVFP4` | ~23.5 GB | **~35.7** | deferred | Largest FT MoE I ran here; proof of the premise. Not the snappy agent host. |
+
+### Compared to Adventures #3 (llama.cpp)
+
+| Model | Speed / quiz | Role vs FreeToken |
+|-------|--------------|-------------------|
+| `Qwen3.5-4B-MTP` Q4 | ~130-148 tok/s; ~5-8/28 | **Snappy** Hermes/OpenCode feel; weaker coding quiz than gpt-oss |
+| `Qwen3.5-9B` Q4 / Sushi Q4 | ~50-90 tok/s; ~2-7/28 | Mid llama.cpp path |
+| `Qwen3.6-35B-A3B` Q8 GGUF | cold ~0.2 / warm ~17 tok/s | Same family as FT headline; **loses** to NVFP4 offload (~35.7) for UX on this box |
+
+**What I would run day to day**
 
 | Need | Pick |
 |------|------|
-| Snappy interactive coding/chat | `Qwen3.5-4B-MTP` (llama.cpp) |
-| Stronger FreeToken default / Hermes on `:1919` | `gpt-oss-20b` |
-| Demo MoE ≫ VRAM | `Qwen3.6-35B-A3B-NVFP4` |
+| Snappy interactive coding/chat | `Qwen3.5-4B-MTP` (llama.cpp) - #3 |
+| Stronger FreeToken / Hermes on `:1919` | `gpt-oss-20b` |
+| Demo MoE larger than VRAM | `Qwen3.6-35B-A3B-NVFP4` |
 
-FreeToken **does not mix** MTP + MoE-offload on these checkpoints (MTP heads dropped at load). Treat as dual configs.
+FreeToken **does not mix** MTP + MoE-offload on these checkpoints. Treat as **two configs**, not one winner.
 
-### Rejected / failed for the MoE story
+### What FreeToken claimed vs this PC
 
-Support list ≠ architecture. A large checkpoint can still be [**dense**](https://github.com/Vince-0/AI_Theory#dense-vs-moe) (no routed experts).
+| Claim | Here |
+|-------|------|
+| MoE larger than VRAM via host-RAM experts | **Yes** - gpt-oss / Gemma / Qwen NVFP4 |
+| Interactive speed on RTX 30-class | **Yes** - roughly 24-46 tok/s on my speed tests |
+| Bandwidth-aware backend | Calibrated; **`offload` won** |
+| Live KV <-> MoE cache trade | **Yes** - `ft ctl cache rebuild --kv/--moe` |
+| Drop-in agent API | **Yes** - Hermes via `ft launch` |
+| Huge frontier MoEs (DeepSeek / GLM / Flash-Next class) | **Out of scope** - need far more host RAM |
 
-| Model | Why |
-|-------|-----|
-| **Muse-Glimmer-30B-NVFP4** | Engine: **dense** / no routed experts -> `fused`; won't fit 10 GB. Support list ≠ MoE architecture |
-| DeepSeek-V4-Flash / GLM-5.x / Qwen3.8-Flash-Next | Expert pools / PLE ≫ 27 GiB (≈160-512 GB-class host RAM) |
-| Dense Qwen3.8-27B as FreeToken MoE demo | Wrong product (`fused`) |
+### Models I tried / rejected (judgment, not only success)
+
+**Shortlist why:** warmup gpt-oss; mid Gemma; Muse same size band as Qwen but **rejected**; headline Qwen NVFP4; llama.cpp Q8 as same-family baseline.
+
+| Rejected | Why (plain) |
+|----------|-------------|
+| Muse-Glimmer-30B-NVFP4 | Labeled like a MoE candidate; engine treated it as **dense** (`fused`) - will not demo host-RAM experts on 10 GB |
+| DeepSeek / GLM / Flash-Next class | Expert pools far beyond ~27 GiB RAM |
+| Dense "27B" as an MoE demo | Wrong product for this story |
 | Kimi / Moonshot class | Not on FreeToken known-good list + huge |
 
-### Context ↔ MoE cache
+**Lesson:** a name on a support list is not the same as MoE architecture.
 
-On gpt-oss, [KV](https://github.com/Vince-0/AI_Theory#walk-attention) and MoE cache share the ~**4 GiB** rebuild budget. Advertised `ctx=131072` ≠ allocated KV (default smoke used **~4k** pages). Background: [AI Theory - KV cache and context](https://github.com/Vince-0/AI_Theory#walk-attention).
+### Longer chat memory slows decode (KV vs MoE cache)
 
-Growing `--kv` alone fails when MoE is already near the ceiling. Live resize must set **both**:
+On the GPU, conversation memory (**KV**) and the **MoE expert cache** share a limited budget. Asking for a huge context without shrinking the expert cache fails. Rebuild **both**:
 
 ```bash
 ft ctl cache rebuild --kv N --moe M --wait 300
 ```
 
-Layer B short-decode sweep on gpt-oss (2026-09-09):
+Short-decode speed on gpt-oss as KV grows (MoE cache shrinks):
 
-| KV target | MoE slots | MoE / KV pool | Mean tok/s | GPU used |
-|-----------|-----------|---------------|------------|----------|
-| 4096 | 316 | 3.9 GiB / 96 MiB | **44.4** | ~8.5 GiB |
-| 32768 | 200 | 2.5 GiB / 768 MiB | **31.4** | ~7.9 GiB |
-| 65536 | 120 | 1.5 GiB / 1.5 GiB | **22.9** | ~7.7 GiB |
+| KV target | MoE slots | Mean tok/s |
+|-----------|-----------|------------|
+| 4096 | 316 | **44.4** |
+| 32768 | 200 | **31.4** |
+| 65536 | 120 | **22.9** |
 
-~**48%** decode drop from speed config -> long-ctx on this short prompt. Publish **two configs**: speed (small KV, big MoE cache) vs long-ctx (large KV, smaller cache). 200k is an aspiration to measure, not a default on 10 GB.
+About **half** the short-decode speed from "speed config" to long context on this test. I treat **two presets**: speed (small KV, big MoE cache) vs long-chat (large KV, smaller cache).
 
 ---
 
-## Agent harness
+## Agents (Hermes / OpenCode)
 
-This is the [**inference / serve**](https://github.com/Vince-0/AI_Theory#walk-serve) path from AI Theory - forward generation only, no training loss loop.
-
-### Hermes
+Same idea as #3: drive a local OpenAI-compatible server from an agent harness. FreeToken speaks that API; `ft launch` wires Hermes/OpenCode.
 
 ```bash
-ft launch hermes --dry-run    # -> http://127.0.0.1:1919/v1 , model gpt-oss-20b
+ft launch hermes --dry-run
 ft launch hermes -y -- chat -q "Reply with exactly the string PHASE7_OK and nothing else." -Q --max-turns 1
 # -> PHASE7_OK
 ```
 
-One-shot proves the OpenAI-compatible wire. Fuller multi-task agent packs are deferred - the open product question is interactive feel vs snappy MTP (~135 tok/s on #3's 4B host).
-
-Same C0 spirit as #3: pinned Python function names, pass/fail parse. gpt-oss landed **19/24** after fixing prompt name pinning (had looked like 5/24 when the oracle and the model disagreed on symbols).
-
-### Opencode
+That one-shot proves the plug-in path. Coding **quality** is the C0 quiz above; **feel** is still snappier on #3's MTP 4B host (~135 tok/s) than on gpt-oss (~45 tok/s).
 
 ```bash
 ft launch opencode --dry-run
 ```
 
-Provider wiring is shorter than #3's llama.cpp `auth.json` tinkering - `ft launch` prints the endpoint. Multi-turn coding loops still feel the tok/s gap vs MTP; I didn't chase a Tetris.html rematch on FreeToken.
+Less provider config pain than #3's llama.cpp `auth.json` tinkering. I did not rematch Tetris.html on FreeToken.
 
 ---
 
-## Lessons for self-hosted infra
+## Issues (so you can trust the path)
 
-1. **RAM = MoE fit gate; VRAM = cache + KV gate.**
-2. **PCIe H2D offload ≠ disk** - HDD hurts load, not steady decode once resident.
-3. **WSL RAM ≠ Task Manager** - measure with `free -h` inside the guest.
-4. **Support matrix ≠ architecture** - Muse taught that.
-5. **Same-family Q8 GGUF can lose to NVFP4/offload** when weights ≫ RAM.
-6. **Pin/mlock limits** on large MoEs -> pageable CPU experts; expect jitter.
-7. **Eval oracles need pinned API names** - C0 jumped 5/24 -> 19/24 on gpt-oss.
-8. Rank **pass x wall** (and harness), not tok/s alone - gpt-oss ~45 @ 19/24 vs #3 MTP ~135 @ ~6-8/28.
-9. **KV↑ without MoE↓ fails** - rebuild both; 4k/316 -> 64k/120 costs ~half short-decode tok/s.
-10. On limited hardware, prefer **most capable model at acceptable interactive tok/s** - dual hosts (snappy MTP vs capable MoE), not one fake winner.
-11. Default **Q4/NVFP4-class** weights; climb a rung for code/numbers - don't chase unloadable BF16.
-
-**Purchase hypotheses (not yet ROI-proven):** SSD -> less wait; **≥64 GB RAM** -> larger MoEs / fewer pageable layers; **≥24 GB VRAM** -> long ctx + large MoE cache together. Neither alone unlocks Flash-Next/DeepSeek-class FreeToken (≈128-192 GB+ host RAM).
+| Symptom | What I did / learned |
+|---------|----------------------|
+| Minutes of cold load on HDD | Warm up before quoting tok/s |
+| Bandwidth bench picks offload | Use `--moe-backend offload` here |
+| HF "13 GB" model downloads ~41 GB | Exclude unused variants (`metal/*`, `original/*`) |
+| Empty replies on short generations | gpt-oss reasoning budget - lower reasoning effort for smoke tests |
+| C0 looked like 5/24 then 19/24 | Pin required function/class names in prompts |
+| Muse "MoE" failed the story | Dense/`fused` - drop from MoE matrix |
+| Huge Q8 GGUF with `-ngl 99` | Abort; even with fit tricks, NVFP4 offload won for UX |
+| Rebuild KV alone -> errors | Always pass `--moe` down with `--kv` |
+| mlock limits on big MoEs | Experts may be pageable - expect jitter or raise limits / add RAM |
 
 ---
 
-## Issues encountered
+## Lessons (short)
 
-| Symptom | Workaround / lesson |
-|---------|---------------------|
-| Cold load ~minutes on HDD | Exclude from tok/s; warmup before measure |
-| `ft bench bw` -> offload not hybrid | Ratio &lt; 2x on this host - use offload |
-| HF gpt-oss ~41 GB for "13 GB" model | `--exclude metal/* original/*` |
-| Empty `content` on short `max_tokens` | gpt-oss reasoning budget - `reasoning_effort=low` |
-| C0 5/24 then 19/24 | Pin required function names in prompts |
-| Muse "MoE" fail | Dense / fused - drop from MoE matrix |
-| llama.cpp `-ngl 99` on 35 GB Q8 | Abort; use `-fit on`; still loses to FT NVFP4 |
-| `rebuild --kv 32k` alone -> 503 | Pass `--moe` down with `--kv` |
-| mlock / RLIMIT_MEMLOCK on large MoEs | Pageable CPU layers; raise ulimit or more RAM |
+1. **RAM** gates whether the MoE fits; **VRAM** gates cache + chat memory.
+2. PCIe miss traffic is not the same problem as a slow disk.
+3. Measure WSL RAM inside the guest (`free -h`).
+4. Support matrix ≠ architecture (Muse).
+5. Same-family Q8 GGUF can lose to NVFP4 + FreeToken offload when the file is bigger than RAM.
+6. Rank **quiz score and speed together** - not tok/s alone.
+7. Dual hosts beat one fake winner: snappy MTP vs capable MoE.
+
+**Maybe later (not proven ROI):** SSD for less waiting; more RAM for bigger MoEs; more VRAM for long chat + big expert cache together. None of those alone unlocks the largest frontier MoEs on FreeToken.
+
+---
+
+## Key concepts (this adventure)
+
+General LLM / MoE / chat-wrapper vocabulary: **[AI Theory](https://github.com/Vince-0/AI_Theory#key-concepts)**.
+
+| Term | Full name / meaning | On this adventure |
+|------|---------------------|-------------------|
+| **Host RAM (WSL)** | System memory in the Linux guest | **MoE fit gate** (~27 GiB). Use `free -h` in WSL. |
+| **VRAM** | Video RAM on the GPU | 10 GB: attention + MoE cache + KV - not the expert pool. |
+| **Expert pool** | All MoE specialist weights | Stays in **host RAM** with FreeToken offload. |
+| **MoE cache (LRU)** | Least-recently-used hot experts on GPU | Misses fetch over PCIe (`offload`) or CPU. |
+| **`offload` vs `hybrid`** | Miss backends | This box: **`offload`** after `ft bench bw`. |
+| **PCIe H2D** | Host-to-GPU copy | Steady miss path once resident (not HDD load). |
+| **KV reserve / rebuild** | Chat memory pages + live resize | `ft ctl cache rebuild --kv N --moe M`. |
+| **NVFP4 / MXFP4** | Compact weight formats | Why these MoEs fit ~27 GiB RAM. |
+| **`fused` (dense on FT)** | No routed experts | Wrong demo for host-RAM MoE. |
+| **`ft serve` / `ft launch` / `ft ctl`** | FreeToken CLI | Serve, agents, cache rebuild. |
+| **MTP (vs #3)** | Multi-token prediction | Fast fitted GGUFs in #3; not mixed with FT MoE-offload here. |
 
 ---
 
 ## Reflections
 
-FreeToken's **consumer MoE** story **holds** on a 3080 + ~27 GiB WSL box for gpt-oss / Gemma / Qwen NVFP4. The interesting work was not "it runs," but **filtering**, **honest baselines**, and **memory knobs** (KV vs MoE cache).
+FreeToken's consumer MoE story **holds** on a 3080 + ~27 GiB WSL box for gpt-oss / Gemma / Qwen NVFP4. The interesting work was not only "it runs," but **filtering**, **honest baselines**, and **memory knobs** (KV vs MoE cache).
 
-There is still so much to learn and the pace of new MoE / quant / agent harness releases is thick and fast. I don't know everything - but I know which wall I'm hitting now (host RAM), and which dual configs I'd actually leave running.
+I still have a lot to learn. I do know which wall I hit (host RAM) and which two setups I would leave running.
 
-**What I'd run day-to-day**
-
-- Snappy agent loops -> still **Qwen3.5-4B-MTP** (~135 tok/s).
-- FreeToken / OpenAI-compatible `:1919` -> **gpt-oss-20b** (~45 tok/s, best C0 here).
-- Show-and-tell ≫VRAM MoE -> **Qwen3.6-35B-A3B-NVFP4**.
-
-Next software (optional): Qwen C0, longer Hermes task packs, measure a personal interactive tok/s floor.
+Optional next: finish Qwen C0, longer Hermes task packs, personal "feels interactive" tok/s floor.
 
 ---
 
 ## Links
 
-- Primer: [AI Theory](https://github.com/Vince-0/AI_Theory) (token -> transformer -> MoE/KV -> train vs serve)
+- [AI Theory](https://github.com/Vince-0/AI_Theory) - plain-language LLM / MoE / agents primer
 - [FreeToken](https://github.com/FlashML-org/FreeToken) · [models.md](https://github.com/FlashML-org/FreeToken/blob/main/docs/models.md) · [paper](https://arxiv.org/abs/2608.16157)
-- [0xSero local-ai-frontier](https://huggingface.co/spaces/0xSero/local-ai-frontier) (external Pareto framing - other hardware)
-- Prior series: [AdventuresInAICoding3](https://github.com/Vince-0/AdventuresInAICoding3)
-- Local lab notes: C0 harness under `opencode/benchmark_python_*` · baselines `results_python.log` · benches `phase6_bench.py`, `phase6_ctx_sweep.py`, `bench-results/`
+- [Adventures #3](https://github.com/Vince-0/AdventuresInAICoding3) - MTP / fitted GGUF baseline
+- [0xSero local-ai-frontier](https://huggingface.co/spaces/0xSero/local-ai-frontier) - external Pareto framing (other hardware)
 
-*Weights, `.venv`, and HF tokens are not part of this write-up.*
+*Weights, secrets, and the full local C0 harness scripts are not part of this repo.*
