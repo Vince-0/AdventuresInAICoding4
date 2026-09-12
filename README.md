@@ -11,18 +11,21 @@ Run a larger model than what your VRAM allows.
 
 ## Key concepts
 
-Short glossary for this adventure. Deeper LLM pipeline (token → transformer → MoE/KV → train vs serve): **[AI Theory](https://github.com/Vince-0/AI_Theory)**.
+Adventure-specific terms for FreeToken on this box. General LLM / MoE / KV pipeline: **[AI Theory](https://github.com/Vince-0/AI_Theory#key-concepts)**.
 
-| Acronym | Stands for | Brief explanation |
-|---------|------------|-------------------|
-| **WSL** | Windows Subsystem for Linux | Linux environment on Windows; this adventure runs Ubuntu + CUDA inside WSL |
-| **VRAM** | Video RAM | On-GPU memory (here: RTX 3080 **10 GB**) - holds attention, expert cache, and [KV](https://github.com/Vince-0/AI_Theory#glossary), not the full [MoE](https://github.com/Vince-0/AI_Theory#glossary) [expert pool](https://github.com/Vince-0/AI_Theory#sparse-compute-vs-storage) |
-| **GPU** | Graphics Processing Unit | The NVIDIA card doing inference; VRAM is its fast local memory |
-| **MoE** | [Mixture of Experts](https://github.com/Vince-0/AI_Theory#glossary) | Sparse model: only a few “[experts](https://github.com/Vince-0/AI_Theory#glossary)” activate per token, but the **full** expert pool still needs storage somewhere |
-| **KV** | [Key-Value (cache)](https://github.com/Vince-0/AI_Theory#kv-cache-and-context) | Per-token attention state kept during generation; larger context → more KV memory |
-| **LRU** | Least Recently Used | Cache eviction policy - FreeToken keeps hot experts in VRAM and drops cold ones first |
-| **GGUF** | GPT-Generated Unified Format | Common llama.cpp weight file format (quantized `.gguf`); Adventures #3’s stack |
-| **MTP** | Multi-Token Prediction | Speculative decoding that drafts several tokens per step - #3’s speed story on fitted GGUFs |
+| Term | Stands for / full name | On this adventure |
+|------|------------------------|-------------------|
+| **Host RAM (WSL)** | System memory inside the Linux guest | **MoE fit gate** (~27 GiB). Measure with `free -h` in WSL, not Task Manager. |
+| **VRAM** | Video RAM (GPU memory) | RTX 3080 **10 GB**: attention + **MoE cache** + KV - **not** the full expert pool. |
+| **Expert pool** | All MoE expert weights | Lives in **host RAM** for FreeToken offload. |
+| **MoE cache (LRU)** | Least-Recently-Used expert cache in VRAM | Hot experts stay on GPU; misses fetch over PCIe (`offload`) or CPU. |
+| **`offload` vs `hybrid`** | FreeToken MoE miss backends | Pick with `ft bench bw`. This box: **`offload`** (CPU/PCIe ratio &lt; 2x). |
+| **PCIe H2D** | Host-to-device over PCI Express | Steady expert-miss path once weights are resident - not the same as HDD cold load. |
+| **KV reserve / rebuild** | Allocated context pages + live cache resize | `ft ctl cache rebuild --kv N --moe M` - growing KV alone fails if MoE cache is already maxed. |
+| **NVFP4 / MXFP4** | Low-bit weight formats FreeToken serves here | What made gpt-oss / Gemma / Qwen MoEs fit ~27 GiB RAM. |
+| **`fused` (dense on FT)** | Engine path with no routed experts | Support list ≠ MoE architecture (Muse lesson) - wrong demo for host-RAM experts. |
+| **`ft serve` / `ft launch` / `ft ctl`** | FreeToken CLI | Serve on `:1919`, launch Hermes/OpenCode, rebuild caches. |
+| **MTP (vs #3)** | Multi-Token Prediction | #3 speed story on *fitted* GGUFs. FreeToken MoE-offload here does not mix MTP - dual configs. |
 
 ---
 
@@ -194,33 +197,7 @@ Same C0 spirit as #3: pinned Python function names, pass/fail parse. gpt-oss lan
 ft launch opencode --dry-run
 ```
 
-Provider wiring is shorter than #3’s llama.cpp `auth.json` tinkering - `ft launch` prints the endpoint. Multi-turn coding loops still feel the tok/s gap vs MTP; I didn’t chase a Tetris.html rematch on FreeToken.
-
----
-
-## FreeToken terms (deeper)
-
-<details>
-<summary>How FreeToken uses the jargon above (click to expand)</summary>
-
-| Term | Meaning here |
-|------|----------------|
-| **Expert pool** | Full MoE weights in **host RAM** ([AI Theory](https://github.com/Vince-0/AI_Theory#sparse-compute-vs-storage)) |
-| **MoE cache** | LRU subset of experts resident in **VRAM**; misses → PCIe/`offload` or CPU |
-| **`offload` vs `hybrid`** | Miss policy; pick with `ft bench bw` (this box: offload) |
-| **KV reserve** | Allocated context pages - not the marketing max ctx ([KV primer](https://github.com/Vince-0/AI_Theory#kv-cache-and-context)) |
-| **NVFP4 / MXFP4** | Weight formats that make consumer MoEs fit ~27 GiB RAM |
-| **TTFT vs decode tok/s** | Prefill/latency to first token vs steady generation - don’t mix into one number |
-| **Quantization** | Fewer bits per weight → smaller files / less RAM. Q4 / NVFP4-class is the consumer sweet spot here |
-| **Agent harness** | Hermes / OpenCode (etc.) driving a local OpenAI-compatible server for multi-step tool use |
-
-**Memory walls on this PC**
-
-- **VRAM (10 GB):** attention + MoE cache + KV - not the expert pool
-- **Host RAM (~27 GiB):** expert pool fit gate - measure inside WSL, not Task Manager
-- **Disk (HDD):** cold load / download only; steady decode is PCIe / CPU once resident
-
-</details>
+Provider wiring is shorter than #3's llama.cpp `auth.json` tinkering - `ft launch` prints the endpoint. Multi-turn coding loops still feel the tok/s gap vs MTP; I didn't chase a Tetris.html rematch on FreeToken.
 
 ---
 
