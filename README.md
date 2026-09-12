@@ -11,6 +11,26 @@
 
 ---
 
+## Key concepts (this adventure)
+
+Read this first if the jargon below is new. Broader LLM / MoE / chat-wrapper vocabulary: **[AI Theory](https://github.com/Vince-0/AI_Theory#key-concepts)**.
+
+| Term | Full name / meaning | On this adventure |
+|------|---------------------|-------------------|
+| **Host RAM (WSL)** | **Host** random-access memory = system RAM inside the **Windows Subsystem for Linux** guest | **MoE fit gate** (~27 GiB). Check with `free -h` in WSL. |
+| **VRAM** | **Video** random-access memory = memory on the graphics card (GPU) | 10 GB for attention + MoE cache + KV - **not** the full expert pool. |
+| **Expert pool** | The full set of MoE **specialist** weight tensors | Stays in **host RAM** with FreeToken offload. |
+| **MoE cache (LRU)** | **Mixture-of-Experts** GPU **cache** using **least-recently-used** eviction | Hot specialists on the card; miss -> fetch over PCIe (`offload`) or CPU. |
+| **`offload` vs `hybrid`** | FreeToken **miss backends** (how a cache miss is filled) | This box prefers **`offload`** after `ft bench bw`. |
+| **PCIe H2D** | **Peripheral Component Interconnect Express**, **host-to-device** copy (CPU RAM -> GPU) | Steady miss path once weights are resident (not the HDD download). |
+| **KV reserve / rebuild** | **Key-Value** attention cache: **reserve** = how many pages are set aside; **rebuild** = resize live via CLI | `ft ctl cache rebuild --kv N --moe M` (trade chat length vs MoE cache). |
+| **NVFP4 / MXFP4** | **NVIDIA 4-bit floating point** / **microscaling 4-bit floating point** weight formats | Why these MoEs fit ~27 GiB host RAM. |
+| **`fused` (dense on FT)** | FreeToken **fused** path = **dense** model (no routed experts) | Wrong demo for host-RAM MoE offload. |
+| **`ft serve` / `ft launch` / `ft ctl`** | FreeToken command-line tools: **serve** HTTP, **launch** agent stack, **ctl** control/cache | Day-to-day ops after install. |
+| **MTP (vs #3)** | **Multi-token prediction** (draft several tokens ahead) | Fast **fitted** GGUFs in Adventure #3 - not mixed with FreeToken MoE-offload here. |
+
+---
+
 ## Why
 
 Cloud AI is someone else's computer, and credits add up. In [Adventures #3](https://github.com/Vince-0/AdventuresInAICoding3) I pushed **models that already fit** a 10 GB card to go **faster** (MTP on small GGUFs).
@@ -205,25 +225,6 @@ Less provider config pain than #3's llama.cpp `auth.json` tinkering. I did not r
 
 **Maybe later (not proven ROI):** SSD for less waiting; more RAM for bigger MoEs; more VRAM for long chat + big expert cache together. None of those alone unlocks the largest frontier MoEs on FreeToken.
 
----
-
-## Key concepts (this adventure)
-
-General LLM / MoE / chat-wrapper vocabulary: **[AI Theory](https://github.com/Vince-0/AI_Theory#key-concepts)**.
-
-| Term | Full name / meaning | On this adventure |
-|------|---------------------|-------------------|
-| **Host RAM (WSL)** | System memory in the Linux guest | **MoE fit gate** (~27 GiB). Use `free -h` in WSL. |
-| **VRAM** | Video RAM on the GPU | 10 GB: attention + MoE cache + KV - not the expert pool. |
-| **Expert pool** | All MoE specialist weights | Stays in **host RAM** with FreeToken offload. |
-| **MoE cache (LRU)** | Least-recently-used hot experts on GPU | Misses fetch over PCIe (`offload`) or CPU. |
-| **`offload` vs `hybrid`** | Miss backends | This box: **`offload`** after `ft bench bw`. |
-| **PCIe H2D** | Host-to-GPU copy | Steady miss path once resident (not HDD load). |
-| **KV reserve / rebuild** | Chat memory pages + live resize | `ft ctl cache rebuild --kv N --moe M`. |
-| **NVFP4 / MXFP4** | Compact weight formats | Why these MoEs fit ~27 GiB RAM. |
-| **`fused` (dense on FT)** | No routed experts | Wrong demo for host-RAM MoE. |
-| **`ft serve` / `ft launch` / `ft ctl`** | FreeToken CLI | Serve, agents, cache rebuild. |
-| **MTP (vs #3)** | Multi-token prediction | Fast fitted GGUFs in #3; not mixed with FT MoE-offload here. |
 
 ---
 
