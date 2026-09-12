@@ -11,143 +11,26 @@ Run a larger model than what your VRAM allows.
 
 ## Key concepts
 
+Short glossary for this adventure. Deeper LLM pipeline (token → transformer → MoE/KV → train vs serve): **[AI Theory](https://github.com/Vince-0/AI_Theory)**.
+
 | Acronym | Stands for | Brief explanation |
 |---------|------------|-------------------|
 | **WSL** | Windows Subsystem for Linux | Linux environment on Windows; this adventure runs Ubuntu + CUDA inside WSL |
-| **VRAM** | Video RAM | On-GPU memory (here: RTX 3080 **10 GB**) - holds attention, expert cache, and KV, not the full MoE expert pool |
+| **VRAM** | Video RAM | On-GPU memory (here: RTX 3080 **10 GB**) - holds attention, expert cache, and [KV](https://github.com/Vince-0/AI_Theory#glossary), not the full [MoE](https://github.com/Vince-0/AI_Theory#glossary) [expert pool](https://github.com/Vince-0/AI_Theory#sparse-compute-vs-storage) |
 | **GPU** | Graphics Processing Unit | The NVIDIA card doing inference; VRAM is its fast local memory |
-| **MoE** | Mixture of Experts | Sparse model: only a few “experts” activate per token, but the **full** expert pool still needs storage somewhere |
-| **KV** | Key-Value (cache) | Per-token attention state kept during generation; larger context → more KV memory |
+| **MoE** | [Mixture of Experts](https://github.com/Vince-0/AI_Theory#glossary) | Sparse model: only a few “[experts](https://github.com/Vince-0/AI_Theory#glossary)” activate per token, but the **full** expert pool still needs storage somewhere |
+| **KV** | [Key-Value (cache)](https://github.com/Vince-0/AI_Theory#kv-cache-and-context) | Per-token attention state kept during generation; larger context → more KV memory |
 | **LRU** | Least Recently Used | Cache eviction policy - FreeToken keeps hot experts in VRAM and drops cold ones first |
 | **GGUF** | GPT-Generated Unified Format | Common llama.cpp weight file format (quantized `.gguf`); Adventures #3’s stack |
 | **MTP** | Multi-Token Prediction | Speculative decoding that drafts several tokens per step - #3’s speed story on fitted GGUFs |
-
-### LLM theory (serial story)
-
-How a local LLM turns a sentence into the next token - and where MoE, KV, training loss, and FreeToken’s memory story sit in that pipeline.
-
-#### Theory glossary
-
-| Term | Brief explanation |
-|------|-------------------|
-| **Token / tokenization** | Text split into pieces the model knows (often subwords), each mapped to an integer **token ID** |
-| **Embedding** | Lookup that turns each token ID into a vector (list of numbers) - the starting **hidden state** |
-| **Transformer layer** | One repeat of attention + feed-forward (dense MLP or MoE); models stack many layers |
-| **Attention** | Lets each position mix information from other tokens in the sequence (“what context matters?”) |
-| **Query / Key / Value** | Internal attention projections; **KV cache** stores past Keys and Values so generation need not recompute the whole prompt every step |
-| **MLP / FFN** | Multi-Layer Perceptron / feed-forward network after attention - transforms each token on its own (expand → nonlinearity → shrink) |
-| **Dense model** | One shared MLP/FFN per layer for every token - all those weights run every step |
-| **Expert** | One MLP/FFN in an MoE bank - same job as a dense FFN, own weights; router picks a few per token |
-| **Router (gating)** | Small network that scores experts and selects top-k for this token |
-| **Expert pool** | **All** expert weight tensors across MoE layers - full storage footprint even when only a few experts run |
-| **Sparse compute** | Only selected experts execute per token; most of the pool stays idle for that step |
-| **Logits / softmax** | Raw vocab scores then probabilities for “what token comes next?” |
-| **Decoding** | Choosing a token from that distribution (argmax or sampling) during **inference** |
-| **Inference (serve)** | Forward-only generation loop used by FreeToken / llama.cpp / chat - no ground-truth token, no loss step |
-| **Training** | Forward pass plus compare to the **true** next token → **loss** → backprop updates weights |
-| **Loss / error** | Training-only measure of how wrong the predicted distribution was vs the actual next token (e.g. cross-entropy) |
-| **Detokenize** | Map generated token IDs back to readable text |
-
-#### Serial story
-
-**0. Raw input** - e.g. `The cat sat on the`
-
-**1. Tokenization** - tokenizer → token IDs (illustrative, not exact):  
-`The` `cat` `sat` `on` `the` → `[15496, 3797, 3290, 319, 262]`
-
-**2. Embedding** - each ID becomes a vector; the sentence is now a sequence of hidden states.
-
-**3. Stack of transformer layers** (repeat many times):
-
-- **3a. Attention (+ KV)** - positions look at each other and mix context. During generation, past **K/V** are cached; longer context → more KV memory (often in VRAM).
-- **3b. Dense MLP or MoE** - after attention, each token hits a feed-forward block. **Dense:** one shared FFN. **MoE:** a bank of **expert** FFNs + a **router**; only top-k experts run (**sparse compute**), but the **expert pool** still needs a home (FreeToken: host RAM + LRU expert cache in VRAM).
-
-**4. Prediction head** - final linear layer (**lm_head**) → logits → usually softmax → distribution over the vocabulary.
-
-**Branch A - Inference (serving):** pick next token → append → loop until stop. No “actual” next token and no error signal in the loop; quality is judged later (benchmarks, humans).
-
-**Branch B - Training:** compare predicted distribution to the true next token from the dataset → **loss** → backprop updates weights (embeddings, attention, MLPs/experts, router, …).
-
-One-line summary for this adventure:
-
-- **Forward:** input → tokens → vectors → attention (+ KV when generating) → MLP or MoE → next-token prediction.
-- **Train only:** prediction vs true next token → loss → update weights.
-- **Serve only:** prediction → chosen token → stream output (what FreeToken does).
-
-#### Mermaid - full flow (train vs serve)
-
-Attention, KV, and dense MLP / MoE live **inside** each transformer layer; that layer block repeats N times. Tokenize/embed are before the stack; LM head and train/serve branch are after.
-
-```mermaid
-flowchart TD
-  inputText["Input text: The cat sat on the"]
-  tokenize["1. Tokenize to token IDs"]
-  embed["2. Embed IDs to vectors"]
-
-  subgraph transformerStack ["Transformer stack: repeat layer 1..N"]
-    direction TB
-    attention["3a. Attention mix across tokens"]
-    kvCache["KV cache store or reuse Keys and Values"]
-    denseOrMoe{"3b. Dense MLP or MoE?"}
-    denseMlp["One shared FFN/MLP per token"]
-    moeRouter["Router picks top experts"]
-    moeExperts["Run few expert MLPs only"]
-    expertPool["Full expert pool still stored in RAM"]
-    nextHidden["Updated hidden states"]
-    moreLayers{"More layers?"}
-
-    attention --> kvCache --> denseOrMoe
-    denseOrMoe -->|dense| denseMlp --> nextHidden
-    denseOrMoe -->|MoE| moeRouter --> moeExperts --> nextHidden
-    moeRouter -.-> expertPool
-    moeExperts -.-> expertPool
-    nextHidden --> moreLayers
-    moreLayers -->|"yes: next layer"| attention
-  end
-
-  lmHead["4. LM head to vocab logits / probs"]
-  branch{"Training or inference?"}
-  pickToken["Pick next token argmax or sample"]
-  detok["Detokenize and show / append"]
-  loopGen["Append token and loop for more"]
-  compare["Compare prediction vs true next token"]
-  loss["Compute loss / error"]
-  update["Backprop update weights"]
-
-  inputText --> tokenize --> embed --> attention
-  moreLayers -->|"no: stack done"| lmHead --> branch
-  branch -->|inference serve| pickToken --> detok --> loopGen
-  loopGen -->|"more tokens"| attention
-  branch -->|training| compare --> loss --> update
-```
-
-#### Mermaid - one decode step
-
-```mermaid
-flowchart LR
-  prompt["Prompt text"] --> tok["Tokens"]
-  tok --> emb["Embeddings"]
-
-  subgraph oneLayer ["One transformer layer inside stack x N"]
-    direction LR
-    attn["Attention + KV"]
-    ffn["MLP or MoE experts"]
-    attn --> ffn
-  end
-
-  emb --> attn
-  ffn --> pred["Next-token probs"]
-  pred --> out["Chosen token / output"]
-  pred --> trainPath["Train only: vs true token then loss"]
-```
 
 ---
 
 ## Why
 
-Because the cloud is someone else's computer and AI usage credits aren't cheap. Adventures #3 got models that **already fit** a 10GB card running **faster** (MTP on small GGUFs). This round asks a different question: which Mixture-of-Experts models that **don't fit VRAM** can still run at interactive speed on the same box?
+Because the cloud is someone else's computer and AI usage credits aren't cheap. Adventures #3 got models that **already fit** a 10GB card running **faster** (MTP on small GGUFs). This round asks a different question: which [Mixture-of-Experts](https://github.com/Vince-0/AI_Theory#glossary) models that **don't fit VRAM** can still run at interactive speed on the same box?
 
-Usual local LLM rule: **weights + KV must fit in VRAM**. MoE breaks the *compute* side of that story (few experts active per token) but not the *storage* side - the full expert pool is still huge.
+Usual local LLM rule: **weights + [KV](https://github.com/Vince-0/AI_Theory#kv-cache-and-context) must fit in VRAM**. MoE breaks the *compute* side of that story (few experts active per token) but not the *storage* side - the full [expert pool](https://github.com/Vince-0/AI_Theory#sparse-compute-vs-storage) is still huge. ([AI Theory - sparse compute vs storage](https://github.com/Vince-0/AI_Theory#sparse-compute-vs-storage))
 
 **FreeToken’s premise:** keep experts in **host RAM**, use the GPU as attention + an **LRU expert cache**, and on misses stream over **PCIe** (`offload`) or run on CPU / hybrid. Success on a gaming PC is “MoE larger than VRAM runs at interactive speed,” not “buy a 48GB card.”
 
@@ -178,7 +61,7 @@ Get FreeToken serving on WSL, calibrate bandwidth, filter [models.md](https://gi
 | **llama.cpp / Ollama** | Quantize until weights (+ KV) fit | Huge MoE expert pools still awkward; oversized GGUF thrash when ≫ RAM |
 | **vLLM / dense “fit the card”** | High-throughput serving for fitted weights | Wrong product for “35B MoE on 10GB VRAM” |
 | **“Just buy VRAM”** | Bigger card holds more | Expensive; doesn’t use MoE sparsity + host RAM as the design center |
-| **FreeToken** | Host-resident experts + GPU cache + bandwidth-aware miss path | Built so **total MoE size ≫ VRAM** is normal |
+| **FreeToken** | Host-resident [experts](https://github.com/Vince-0/AI_Theory#glossary) + GPU cache + bandwidth-aware miss path | Built so **total MoE size ≫ VRAM** is normal ([sparse vs storage](https://github.com/Vince-0/AI_Theory#sparse-compute-vs-storage)) |
 
 This adventure is a **filter + measure** story: what FreeToken’s support matrix allows on **~27 GiB RAM**, not a claim that DeepSeek-class MoEs run on a 3080.
 
@@ -258,6 +141,8 @@ FreeToken **does not mix** MTP + MoE-offload on these checkpoints (MTP heads dro
 
 ### Rejected / failed for the MoE story
 
+Support list ≠ architecture. A large checkpoint can still be [**dense**](https://github.com/Vince-0/AI_Theory#dense-vs-moe) (no routed experts).
+
 | Model | Why |
 |-------|-----|
 | **Muse-Glimmer-30B-NVFP4** | Engine: **dense** / no routed experts → `fused`; won’t fit 10 GB. Support list ≠ MoE architecture |
@@ -267,7 +152,7 @@ FreeToken **does not mix** MTP + MoE-offload on these checkpoints (MTP heads dro
 
 ### Context ↔ MoE cache
 
-On gpt-oss, KV and MoE cache share the ~**4 GiB** rebuild budget. Advertised `ctx=131072` ≠ allocated KV (default smoke used **~4k** pages).
+On gpt-oss, [KV](https://github.com/Vince-0/AI_Theory#kv-cache-and-context) and MoE cache share the ~**4 GiB** rebuild budget. Advertised `ctx=131072` ≠ allocated KV (default smoke used **~4k** pages). Background: [AI Theory - KV cache and context](https://github.com/Vince-0/AI_Theory#kv-cache-and-context).
 
 Growing `--kv` alone fails when MoE is already near the ceiling. Live resize must set **both**:
 
@@ -288,6 +173,8 @@ Layer B short-decode sweep on gpt-oss (2026-09-09):
 ---
 
 ## Agent harness
+
+This is the [**inference / serve**](https://github.com/Vince-0/AI_Theory#branch-a---inference-serving) path from AI Theory - forward generation only, no training loss loop.
 
 ### Hermes
 
@@ -318,10 +205,10 @@ Provider wiring is shorter than #3’s llama.cpp `auth.json` tinkering - `ft lau
 
 | Term | Meaning here |
 |------|----------------|
-| **Expert pool** | Full MoE weights in **host RAM** |
+| **Expert pool** | Full MoE weights in **host RAM** ([AI Theory](https://github.com/Vince-0/AI_Theory#sparse-compute-vs-storage)) |
 | **MoE cache** | LRU subset of experts resident in **VRAM**; misses → PCIe/`offload` or CPU |
 | **`offload` vs `hybrid`** | Miss policy; pick with `ft bench bw` (this box: offload) |
-| **KV reserve** | Allocated context pages - not the marketing max ctx |
+| **KV reserve** | Allocated context pages - not the marketing max ctx ([KV primer](https://github.com/Vince-0/AI_Theory#kv-cache-and-context)) |
 | **NVFP4 / MXFP4** | Weight formats that make consumer MoEs fit ~27 GiB RAM |
 | **TTFT vs decode tok/s** | Prefill/latency to first token vs steady generation - don’t mix into one number |
 | **Quantization** | Fewer bits per weight → smaller files / less RAM. Q4 / NVFP4-class is the consumer sweet spot here |
@@ -383,13 +270,16 @@ There is still so much to learn and the pace of new MoE / quant / agent harness 
 - FreeToken / OpenAI-compatible `:1919` → **gpt-oss-20b** (~45 tok/s, best C0 here).
 - Show-and-tell ≫VRAM MoE → **Qwen3.6-35B-A3B-NVFP4**.
 
-Next software (optional): Qwen C0, longer Hermes task packs, measure a personal interactive tok/s floor. Publish path: `Vince-0/AdventuresInAICoding4` when ready (no weights / secrets).
+Next software (optional): Qwen C0, longer Hermes task packs, measure a personal interactive tok/s floor.
 
 ---
 
 ## Links
 
+- Primer: [AI Theory](https://github.com/Vince-0/AI_Theory) (token → transformer → MoE/KV → train vs serve)
 - [FreeToken](https://github.com/FlashML-org/FreeToken) · [models.md](https://github.com/FlashML-org/FreeToken/blob/main/docs/models.md) · [paper](https://arxiv.org/abs/2608.16157)
 - [0xSero local-ai-frontier](https://huggingface.co/spaces/0xSero/local-ai-frontier) (external Pareto framing - other hardware)
 - Prior series: [AdventuresInAICoding3](https://github.com/Vince-0/AdventuresInAICoding3)
 - Local lab notes: C0 harness under `opencode/benchmark_python_*` · baselines `results_python.log` · benches `phase6_bench.py`, `phase6_ctx_sweep.py`, `bench-results/`
+
+*Weights, `.venv`, and HF tokens are not part of this write-up.*
