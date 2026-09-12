@@ -225,6 +225,43 @@ Less provider config pain than #3's llama.cpp `auth.json` tinkering. I did not r
 
 **Maybe later (not proven ROI):** SSD for less waiting; more RAM for bigger MoEs; more VRAM for long chat + big expert cache together. None of those alone unlocks the largest frontier MoEs on FreeToken.
 
+### How FreeToken differs from llama.cpp
+
+llama.cpp **does** support MoE. The common path (see [DocShotgun's MoE offload guide](https://gist.github.com/DocShotgun/a02a4c0c0a57e43ff4f038b46ca66ae0)) is: put attention / dense / shared experts / KV on the GPU, park **routed experts** in host RAM with `--cpu-moe` / `--n-cpu-moe` / `-ot exps=CPU`, and optionally pin some expert layers back on GPU if VRAM remains. Placement is mostly **fixed at load time**.
+
+FreeToken asks a narrower question: MoE **total size >> VRAM**, with a **dynamic GPU expert cache** and an explicit miss policy.
+
+| | **llama.cpp (typical MoE offload)** | **FreeToken** |
+|---|-------------------------------------|---------------|
+| Expert home | Host RAM (and optionally some layers fixed on GPU) | Host RAM holds the **full expert pool** (source of truth) |
+| Leftover VRAM | Often **whole expert layers** chosen at launch | A **shared LRU MoE cache** of recently routed experts |
+| Placement | **Static** at load (`-ot` / `--n-cpu-moe`) | **Dynamic** - cache follows token routing |
+| Miss handling | Mostly compute on CPU (or pay PCIe if you copy) | Explicit backends: **`offload`** (PCIe fill), **`cpu`**, **`hybrid`** (split by measured bandwidth) |
+| Tuning | Manual `-ot` / layer counts / batch sizes | `ft bench bw` -> prefer offload vs hybrid on *this* box |
+| Formats | **GGUF** ecosystem | Native **NVFP4 / MXFP4** paths (plus its own packing) |
+| Elasticity | Restart / retune for big KV vs weight tradeoffs | Live `ft ctl cache rebuild` (KV vs MoE cache) |
+| Maturity | Very mature server / tooling / ecosystem | Young specialized MoE server |
+
+### Why not just use llama.cpp?
+
+Often you **should**. Prefer llama.cpp (or Ollama / ik_llama forks) when:
+
+- The model **fits** (or nearly fits) and you want max ecosystem maturity
+- You care about **GGUF**, MTP, tooling, and long battle-testing
+- You are fine with **static** expert placement and CPU-heavy decode
+- FreeToken does not support the checkpoint / quant you want
+
+Reach for FreeToken when the question is specifically: **MoE total size >> VRAM**, host RAM holds the pool, and you want interactive decode from a **dynamic GPU expert cache** (and preferably NVFP4-class weights).
+
+On this box that showed up empirically: same-family **Qwen Q8 GGUF** on llama.cpp lost UX to **NVFP4 + FreeToken offload** (warm ~17 vs ~35 tok/s). That is not "llama.cpp cannot MoE" - it is "this format + this miss policy won on 10 GB / ~27 GiB WSL."
+
+Dense "fit the card" servers (e.g. vLLM / SGLang) are usually the wrong default for "35B-class MoE on a 3080." They shine when the model (or shards) fit; they are not primarily "host-RAM expert pool + small consumer VRAM."
+
+### Practical takeaway
+
+- **llama.cpp MoE is real** - attention/KV on GPU, routed experts mostly in RAM.
+- **FreeToken is not "MoE support"** - it is a **different serving architecture** for oversized MoE (cache + miss policy + elastic VRAM split).
+- Default stack here: **llama.cpp for fitted / general work**; **FreeToken when you deliberately want MoE larger than the card** and can live with a younger stack and narrower model matrix.
 
 ---
 
