@@ -11,7 +11,7 @@
 
 ---
 
-## Key concepts (this adventure)
+## Key concepts
 
 Read this first if the jargon below is new. Broader LLM / MoE / chat-wrapper vocabulary: **[AI Theory](https://github.com/Vince-0/AI_Theory#key-concepts)**.
 
@@ -56,7 +56,7 @@ This write-up is **filter + measure** on my ~27 GiB WSL RAM box - not a claim th
 
 ---
 
-## What I did (short path)
+## How
 
 **PC:** Windows 11, WSL Ubuntu 24.04, RTX **3080 10 GB**, WSL `memory=28GB` (~**27 GiB** inside), FreeToken **0.1.2**, CUDA toolkit **13.2** for FreeToken (kept **12.8** for llama.cpp), spinning HDD.
 
@@ -81,7 +81,7 @@ ft serve --model ~/LLM/models/hf/gpt-oss-20b --served-model-name gpt-oss-20b \
 
 ---
 
-## How I measured
+## Measuring
 
 Two different scores - do not mix them:
 
@@ -146,7 +146,7 @@ FreeToken **does not mix** MTP + MoE-offload on these checkpoints. Treat as **tw
 
 ### Models I tried / rejected (judgment, not only success)
 
-**Shortlist why:** warmup gpt-oss; mid Gemma; Muse same size band as Qwen but **rejected**; headline Qwen NVFP4; llama.cpp Q8 as same-family baseline.
+**Shortlist:** warmup gpt-oss; mid Gemma; Muse same size band as Qwen but **rejected**; headline Qwen NVFP4; llama.cpp Q8 as same-family baseline.
 
 | Rejected | Why (plain) |
 |----------|-------------|
@@ -197,7 +197,7 @@ Less provider config pain than #3's llama.cpp `auth.json` tinkering. I did not r
 
 ---
 
-## Issues (so you can trust the path)
+## Issues
 
 | Symptom | What I did / learned |
 |---------|----------------------|
@@ -213,7 +213,7 @@ Less provider config pain than #3's llama.cpp `auth.json` tinkering. I did not r
 
 ---
 
-## Lessons (short)
+## Lessons
 
 1. **RAM** gates whether the MoE fits; **VRAM** gates cache + chat memory.
 2. PCIe miss traffic is not the same problem as a slow disk.
@@ -235,14 +235,3 @@ FreeToken's consumer MoE story **holds** on a 3080 + ~27 GiB WSL box for gpt-oss
 I still have a lot to learn. I do know which wall I hit (host RAM) and which two setups I would leave running.
 
 Optional next: finish Qwen C0, longer Hermes task packs, personal "feels interactive" tok/s floor.
-
----
-
-## Links
-
-- [AI Theory](https://github.com/Vince-0/AI_Theory) - plain-language LLM / MoE / agents primer
-- [FreeToken](https://github.com/FlashML-org/FreeToken) · [models.md](https://github.com/FlashML-org/FreeToken/blob/main/docs/models.md) · [paper](https://arxiv.org/abs/2608.16157)
-- [Adventures #3](https://github.com/Vince-0/AdventuresInAICoding3) - MTP / fitted GGUF baseline
-- [0xSero local-ai-frontier](https://huggingface.co/spaces/0xSero/local-ai-frontier) - external Pareto framing (other hardware)
-
-*Weights, secrets, and the full local C0 harness scripts are not part of this repo.*
