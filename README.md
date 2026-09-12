@@ -223,7 +223,9 @@ Less provider config pain than #3's llama.cpp `auth.json` tinkering. I did not r
 6. Rank **quiz score and speed together** - not tok/s alone.
 7. Dual hosts beat one fake winner: snappy MTP vs capable MoE.
 
-**Maybe later (not proven ROI):** SSD for less waiting; more RAM for bigger MoEs; more VRAM for long chat + big expert cache together. None of those alone unlocks the largest frontier MoEs on FreeToken.
+**Maybe later:** SSD for less waiting; more RAM for bigger MoEs; more VRAM for long chat + big expert cache together. None of those alone unlocks the largest frontier MoEs on FreeToken.
+
+---
 
 ### How FreeToken differs from llama.cpp
 
@@ -267,8 +269,6 @@ Dense "fit the card" servers (e.g. vLLM / SGLang) are usually the wrong default 
 
 ## Reflections
 
-FreeToken's consumer MoE story **holds** on a 3080 + ~27 GiB WSL box for gpt-oss / Gemma / Qwen NVFP4. The interesting work was not only "it runs," but **filtering**, **honest baselines**, and **memory knobs** (KV vs MoE cache).
+FreeToken's consumer MoE story holds on a 3080 + ~27 GiB WSL box for gpt-oss / Gemma / Qwen NVFP4.
 
 I still have a lot to learn. I do know which wall I hit (host RAM) and which two setups I would leave running.
-
-Optional next: finish Qwen C0, longer Hermes task packs, personal "feels interactive" tok/s floor.
