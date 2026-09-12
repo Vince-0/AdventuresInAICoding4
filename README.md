@@ -1,7 +1,7 @@
 # Adventures In AI Coding 4
 ## FreeToken
 
-**I ran Mixture-of-Experts models bigger than my 10 GB graphics card** by keeping the specialists in system RAM using FreeToken. Here is what worked, how fast, what passed a small coding quiz, and what I would actually leave running day to day.
+**I ran Mixture-of-Experts models bigger than my 10 GB graphics card** by keeping the specialists in system RAM using FreeToken with **trade-offs**. Here is what worked, how fast, what passed a small coding quiz, and what I would actually leave running day to day.
 
 **Series:** [AI_Coding](https://github.com/Vince-0/AI_Coding) -> [AdventuresInAICoding](https://github.com/Vince-0/AdventuresInAICoding) -> [AdventuresInAICoding2](https://github.com/Vince-0/AdventuresInAICoding2) -> [AdventuresInAICoding3](https://github.com/Vince-0/AdventuresInAICoding3) -> **#4 FreeToken**
 
